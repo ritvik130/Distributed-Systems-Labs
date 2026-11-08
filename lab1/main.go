@@ -163,7 +163,7 @@ func handlePost(conn net.Conn, root *os.Root, req *http.Request, filename string
 	committed := false
 	defer func() {
 		if !committed {
-			_ = root.Remove(tempName)
+			root.Remove(tempName)
 		}
 	}()
 
@@ -193,7 +193,7 @@ func handlePost(conn net.Conn, root *os.Root, req *http.Request, filename string
 func handleClient(conn net.Conn, slots chan struct{}, root *os.Root, broker *Broker) {
 	// Always close the connection and free its handler slot.
 	defer func() {
-		_ = conn.Close()
+		conn.Close()
 		<-slots
 	}()
 
@@ -210,6 +210,9 @@ func handleClient(conn net.Conn, slots chan struct{}, root *os.Root, broker *Bro
 		sendError(conn, 501)
 		return
 	}
+
+	// Log the request before routing it to the correct handler.
+	log.Printf("%s %s from %s", req.Method, req.URL.RequestURI(), conn.RemoteAddr())
 
 	// Pub-Sub paths have no file extension, so handle them first.
 	switch req.URL.Path {
@@ -252,7 +255,6 @@ func handleClient(conn net.Conn, slots chan struct{}, root *os.Root, broker *Bro
 		return
 	}
 
-	log.Printf("%s %s from %s", req.Method, req.URL.Path, conn.RemoteAddr())
 	switch req.Method {
 	case "GET":
 		handleGet(conn, root, filename, contentType)

@@ -19,7 +19,7 @@ func handleSubscribe(conn net.Conn, req *http.Request, broker *Broker) {
 
 	id := broker.Subscribe(topicName)
 
-	body := []byte(fmt.Sprintf("%d\n", id))
+	body := []byte(fmt.Sprintf("Subscribed ID: %d\n", id))
 	sendResponse(conn, 200, "text/plain", body)
 }
 
