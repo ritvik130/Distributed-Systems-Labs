@@ -1,0 +1,13 @@
+# Git repository
+.git/
+
+# Local binaries
+http_server
+
+# Uploaded files
+public/
+
+# Python tests and cache
+*.py
+__pycache__/
+
