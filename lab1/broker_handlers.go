@@ -19,7 +19,7 @@ func handleSubscribe(conn net.Conn, req *http.Request, broker *Broker) {
 
 	id := broker.Subscribe(topicName)
 
-	body := []byte(fmt.Sprintf("Subscribed ID: %d\n", id))
+	body := fmt.Appendf(nil, "Subscribed ID: %d\n", id)
 	sendResponse(conn, 200, "text/plain", body)
 }
 
@@ -78,7 +78,7 @@ func handlePublish(conn net.Conn, req *http.Request, broker *Broker) {
 }
 
 // Long-poll for the next message and send back the broker result.
-func handleEvents(conn net.Conn, req *http.Request, broker *Broker) {
+func handleEvents(conn net.Conn, req *http.Request, broker *Broker, slots chan struct{}) {
 	topicName := req.URL.Query().Get("topic")
 	idString := req.URL.Query().Get("id")
 
@@ -94,8 +94,14 @@ func handleEvents(conn net.Conn, req *http.Request, broker *Broker) {
 		return
 	}
 
-	// Events may wait until a message arrives, the user unsubscribes, or timeout.
+	// Release the slot while waiting for a message.
+	<-slots
+
+	// Events may wait until a message arrives, unsubscribe, or timeout.
 	message, status := broker.Events(topicName, id)
+
+	// Take the slot again before sending the response.
+	slots <- struct{}{}
 
 	if status == 200 {
 		sendResponse(conn, 200, "text/plain", message.Data)

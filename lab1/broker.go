@@ -66,7 +66,6 @@ func (broker *Broker) Subscribe(topicName string) uint64 {
 	broker.NextID++
 
 	return sub.ID
-
 }
 
 // Remove a subscriber, or return false if the topic or ID is unknown.
@@ -118,9 +117,7 @@ func (broker *Broker) Publish(topicName string, data []byte) {
 		default:
 
 		}
-
 	}
-
 }
 
 // Find the subscriber that owns the queue requested by a client.
@@ -140,6 +137,7 @@ func (broker *Broker) GetSubscriber(topicName string, id uint64) (*Subscriber, b
 	if !exists {
 		return nil, false
 	}
+
 	return sub, true
 }
 
@@ -151,7 +149,6 @@ func (broker *Broker) Events(topicName string, id uint64) (Message, int) {
 		return Message{}, 400
 	}
 
-	// Do not hold the broker mutex while waiting here.
 	select {
 	case message := <-sub.Queue:
 		return message, 200

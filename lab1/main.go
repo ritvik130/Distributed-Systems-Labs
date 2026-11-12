@@ -152,7 +152,7 @@ func handlePost(conn net.Conn, root *os.Root, req *http.Request, filename string
 
 	// Use a unique name so concurrent uploads do not overwrite each other.
 	tempName := path.Join(path.Dir(filename), ".upload-"+rand.Text()+".tmp")
-	temp, err := root.OpenFile(tempName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	temp, err := root.OpenFile(tempName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		log.Printf("POST temporary file %q: %v", tempName, err)
 		sendError(conn, 400)
@@ -198,7 +198,7 @@ func handleClient(conn net.Conn, slots chan struct{}, root *os.Root, broker *Bro
 	}()
 
 	// Avoid waiting forever for a client to finish its request.
-	_ = conn.SetDeadline(time.Now().Add(requestTimeout))
+	conn.SetDeadline(time.Now().Add(requestTimeout))
 
 	req, err := http.ReadRequest(bufio.NewReader(conn))
 	if err != nil {
@@ -245,7 +245,7 @@ func handleClient(conn net.Conn, slots chan struct{}, root *os.Root, broker *Bro
 			sendError(conn, 501)
 			return
 		}
-		handleEvents(conn, req, broker)
+		handleEvents(conn, req, broker, slots)
 		return
 	}
 
