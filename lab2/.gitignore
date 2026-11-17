@@ -1,0 +1,3 @@
+src/main/*.so
+src/main/mr-out-*
+src/main/mr-tmp/
