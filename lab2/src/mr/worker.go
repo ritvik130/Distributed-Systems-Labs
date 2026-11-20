@@ -33,7 +33,7 @@ func Worker(
 		ok := call("Coordinator.RequestTask", args, reply)
 		if !ok {
 			fmt.Println("Error requesting task")
-			time.Sleep(time.Second)
+			time.Sleep(300 * time.Millisecond)
 			continue
 		}
 
@@ -53,7 +53,7 @@ func Worker(
 
 		default:
 			fmt.Println("Unknown task type:", reply.Type)
-			time.Sleep(time.Second)
+			time.Sleep(300 * time.Millisecond)
 		}
 	}
 }
@@ -75,9 +75,7 @@ func executeMap(
 		reportTask(reply, false, nil)
 		return
 	}
-
-	kvs := mapf(fileName, string(content))
-
+	
 	partitions := make([][]KeyValue, reply.NReduce)
 
 	for _, kv := range kvs {
@@ -102,7 +100,7 @@ func executeMap(
 			reportTask(reply, false, nil)
 			return
 		}
-
+		
 		encoder := json.NewEncoder(f)
 		writeFailed := false
 
@@ -251,7 +249,7 @@ func reportTask(
 		// Do not delete files here. The coordinator may have
 		// received the report even if its response was lost.
 		fmt.Println("Error reporting task; retrying")
-		time.Sleep(time.Second)
+		time.Sleep(300 * time.Millisecond)
 	}
 }
 
