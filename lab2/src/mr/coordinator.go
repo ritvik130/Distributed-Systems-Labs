@@ -152,8 +152,11 @@ func (c *Coordinator) ReportTask(
 		return nil
 	}
 
-	// Validate the attempt and its result.
+	// Accept duplicate reports from the attempt that already completed the task.
 	if task.State == Completed {
+		if args.Success && args.AttemptID == task.AcceptedAttempt {
+			reply.Accepted = true
+		}
 		return nil
 	}
 	if args.AttemptID <= 0 || args.AttemptID > task.AttemptsIssued {
