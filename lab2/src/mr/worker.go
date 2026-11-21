@@ -75,7 +75,9 @@ func executeMap(
 		reportTask(reply, false, nil)
 		return
 	}
-	
+
+	kvs := mapf(fileName, string(content))
+
 	partitions := make([][]KeyValue, reply.NReduce)
 
 	for _, kv := range kvs {
@@ -100,7 +102,7 @@ func executeMap(
 			reportTask(reply, false, nil)
 			return
 		}
-		
+
 		encoder := json.NewEncoder(f)
 		writeFailed := false
 
@@ -175,7 +177,7 @@ func executeReduce(
 	}
 
 	outputFile := fmt.Sprintf(
-		"mr-out-%d-a%d",
+		"reduce-%d-a%d",
 		reply.TaskID,
 		reply.AttemptID,
 	)
