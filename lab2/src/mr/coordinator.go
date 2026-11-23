@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// TaskState is the lifecycle stage of a Map or Reduce task.
+// TaskState tracks whether a task is waiting, running, or finished.
 type TaskState string
 
 const (
@@ -23,12 +23,12 @@ const (
 	Completed  TaskState = "completed"
 )
 
-// Task is the coordinator's bookkeeping for one Map or Reduce task.
+// Task keeps the state and attempt history of a Map or Reduce task.
 type Task struct {
 	State           TaskState
 	InputFile       string    // Map tasks only
 	LastAssigned    time.Time // used to detect timed-out workers
-	AttemptsIssued  int       // also serves as the latest AttemptID
+	AttemptsIssued  int       // next assigned attempt uses this counter
 	AcceptedAttempt int
 	Attempts        map[int]*AttemptInfo
 	OutputFiles     []string // Map: one file per reduce partition; Reduce: the final file
@@ -45,14 +45,14 @@ type WorkerInfo struct {
 	Token   string
 }
 
-// Coordinator hands out tasks to workers and tracks their progress.
+// Coordinator assigns tasks and keeps track of workers and accepted results.
 type Coordinator struct {
 	mu          sync.Mutex
 	MapTasks    []Task
 	ReduceTasks []Task
 	NReduce     int
 
-	// Existing worker fields...
+	// Worker registration and reconnect information.
 	Workers      map[uint64]*WorkerInfo
 	WorkerTokens map[string]uint64
 	NextWorkerID uint64
@@ -60,7 +60,7 @@ type Coordinator struct {
 	InputBaseURL string // HTTP address used to download Map inputs
 }
 
-// allTasksCompleted reports whether every task in the slice is Completed.
+// allTasksCompleted checks whether a phase has finished.
 func allTasksCompleted(tasks []Task) bool {
 	for _, task := range tasks {
 		if task.State != Completed {
@@ -71,11 +71,9 @@ func allTasksCompleted(tasks []Task) bool {
 	return true
 }
 
-// RequestTask is the RPC handler workers call to ask for work.
-//
-// Map tasks are handed out first, then Reduce tasks (only after all Map
-// tasks are done), then ExitTask. A task is assignable if it is idle or has
-// been in progress for 10s or more, in which case the worker is timed out.
+// RequestTask assigns Map tasks first, then Reduce tasks once all Maps finish.
+// Unfinished tasks can be assigned again after 10 seconds; each assignment
+// gets a new AttemptID so the first accepted result can be identified.
 func (c *Coordinator) RequestTask(
 	args *RequestTaskArgs,
 	reply *RequestTaskReply,
@@ -87,7 +85,8 @@ func (c *Coordinator) RequestTask(
 	if !ok {
 		return fmt.Errorf("Worker %d is not registered", args.WorkerID)
 	}
-	// Find the first available Map task
+
+	// Assign an idle Map task, or retry one that has been running too long.
 	for i := range c.MapTasks {
 		task := &c.MapTasks[i]
 
@@ -97,6 +96,7 @@ func (c *Coordinator) RequestTask(
 			task.AttemptsIssued++
 			task.LastAssigned = time.Now()
 
+			// Remember which worker owns this attempt.
 			if task.Attempts == nil {
 				task.Attempts = make(map[int]*AttemptInfo)
 			}
@@ -110,6 +110,8 @@ func (c *Coordinator) RequestTask(
 			reply.AttemptID = task.AttemptsIssued
 			reply.InputFile = task.InputFile
 			reply.NReduce = c.NReduce
+
+			// The Worker downloads input from the Coordinator, not a shared disk.
 			if c.InputBaseURL != "" {
 				reply.InputURL = fmt.Sprintf("%s/inputs/%d", c.InputBaseURL, i)
 			}
@@ -118,13 +120,13 @@ func (c *Coordinator) RequestTask(
 		}
 	}
 
-	// No idle Map tasks, but some are still running.
+	// Wait until all Map results have been accepted.
 	if !allTasksCompleted(c.MapTasks) {
 		reply.Type = WaitTask
 		return nil
 	}
 
-	// All Map tasks are completed. Assign a Reduce task.
+	// Each Reduce task receives the accepted Map output for its partition.
 	for i := range c.ReduceTasks {
 		task := &c.ReduceTasks[i]
 
@@ -147,6 +149,7 @@ func (c *Coordinator) RequestTask(
 			reply.TaskID = i
 			reply.AttemptID = task.AttemptsIssued
 
+			// Give the Reduce Worker the locations of its intermediate files.
 			for mapID, mapTask := range c.MapTasks {
 				attemptID := mapTask.AcceptedAttempt
 				workerID := mapTask.Attempts[attemptID].WorkerID
@@ -165,7 +168,7 @@ func (c *Coordinator) RequestTask(
 					location,
 				)
 
-				// Keep the Basic field temporarily.
+				// Keep the Basic field until the Worker switches to locations.
 				reply.IntermediateFiles = append(
 					reply.IntermediateFiles,
 					mapTask.OutputFiles[i],
@@ -176,21 +179,19 @@ func (c *Coordinator) RequestTask(
 		}
 	}
 
-	// No idle Reduce tasks, but some are still running
+	// Wait for the remaining Reduce results.
 	if !allTasksCompleted(c.ReduceTasks) {
 		reply.Type = WaitTask
 		return nil
 	}
 
-	// Otherwise all tasks are completed
+	// Both phases are complete.
 	reply.Type = ExitTask
 	return nil
 }
 
-// ReportTask is the RPC handler workers call to report a task's result.
-//
-// Invalid, stale, duplicate and failed reports are ignored. Only the first
-// valid successful report for a task is accepted (reply.Accepted = true).
+// ReportTask accepts finished Map tasks. Reduce results use HTTP POST instead.
+// Only a valid successful attempt is accepted; retries from its worker are safe.
 func (c *Coordinator) ReportTask(
 	args *ReportTaskArgs,
 	reply *ReportTaskReply,
@@ -209,14 +210,14 @@ func (c *Coordinator) ReportTask(
 
 	task := &c.MapTasks[args.TaskID]
 
-	// Check that this attempt belongs to the worker.
+	// Reject reports from unknown attempts or a different worker.
 	attempt, exists := task.Attempts[args.AttemptID]
 
 	if !exists || attempt == nil || attempt.WorkerID != args.WorkerID {
 		return nil
 	}
 
-	// Accept duplicate reports from the attempt that completed the task.
+	// A lost RPC reply should not cause the winning Worker to discard its files.
 	if task.State == Completed {
 		if args.Success && args.AttemptID == task.AcceptedAttempt {
 			reply.Accepted = true
@@ -228,12 +229,12 @@ func (c *Coordinator) ReportTask(
 		return nil
 	}
 
-	// Each Map task must produce one file per Reduce partition.
+	// Map outputs are ordered by Reduce partition.
 	if len(args.OutputFiles) != c.NReduce {
 		return nil
 	}
 
-	// The first successful Map attempt wins.
+	// Record the accepted output locations for future Reduce assignments.
 	task.State = Completed
 	task.AcceptedAttempt = args.AttemptID
 	task.OutputFiles = args.OutputFiles
@@ -242,6 +243,8 @@ func (c *Coordinator) ReportTask(
 	return nil
 }
 
+// RegisterWorker gives each process a stable ID while it reuses its token.
+// A repeated registration updates its address instead of creating another ID.
 func (c *Coordinator) RegisterWorker(
 	args *RegisterWorkerArgs,
 	reply *RegisterWorkerReply,
@@ -273,14 +276,14 @@ func (c *Coordinator) RegisterWorker(
 	return nil
 }
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
+// Example is the original sample RPC handler kept for compatibility.
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
 
+// serveMapInput sends the original file for a Map task over HTTP GET.
+// Workers request a task ID rather than supplying an arbitrary file path.
 func (c *Coordinator) serveMapInput(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -299,6 +302,8 @@ func (c *Coordinator) serveMapInput(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, fileName)
 }
 
+// serveReduceOutput receives a final Reduce result over HTTP POST.
+// It validates the attempt and publishes only the first accepted output.
 func (c *Coordinator) serveReduceOutput(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -318,7 +323,7 @@ func (c *Coordinator) serveReduceOutput(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Next: validate the attempt and receive the file.
+	// Check the attempt before accepting an upload.
 	c.mu.Lock()
 	task := &c.ReduceTasks[taskID]
 	attempt, exists := task.Attempts[attemptID]
@@ -329,7 +334,7 @@ func (c *Coordinator) serveReduceOutput(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// If this attempt was already accepted, return success again.
+	// Accept retries from the winner without overwriting mr-out-X.
 	if task.State == Completed {
 		accepted := task.AcceptedAttempt == attemptID
 		c.mu.Unlock()
@@ -342,6 +347,7 @@ func (c *Coordinator) serveReduceOutput(w http.ResponseWriter, r *http.Request) 
 	}
 	c.mu.Unlock()
 
+	// Stage the upload locally so a partial transfer cannot become final output.
 	outFile, err := os.CreateTemp(".", "reduce-upload-")
 	if err != nil {
 		http.Error(w, "Cannot create output file", http.StatusInternalServerError)
@@ -359,7 +365,7 @@ func (c *Coordinator) serveReduceOutput(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Check again because another attempt may have completed during upload.
+	// Another attempt may have finished while this Worker was uploading.
 	c.mu.Lock()
 
 	// If this attempt was already accepted, return success again.
@@ -374,8 +380,7 @@ func (c *Coordinator) serveReduceOutput(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Validation if job is completed
-
+	// Publish the winner and update its state while holding the same lock.
 	finalName := fmt.Sprintf("mr-out-%d", taskID)
 
 	err = os.Rename(tempName, finalName)
@@ -393,11 +398,13 @@ func (c *Coordinator) serveReduceOutput(w http.ResponseWriter, r *http.Request) 
 
 }
 
+// server serves RPC and file transfers through HTTP, preserving the Unix
+// listener for Basic compatibility and enabling TCP when configured.
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
 
-	// Serve Map input files over HTTP.
+	// Register file-transfer routes alongside the RPC endpoint.
 	http.HandleFunc("/inputs/", c.serveMapInput)
 
 	http.HandleFunc("/outputs", c.serveReduceOutput)
@@ -424,8 +431,7 @@ func (c *Coordinator) server() {
 	}
 }
 
-// main/mrcoordinator.go calls Done() periodically to find out
-// if the entire job has finished.
+// Done is polled by the coordinator main process until both phases finish.
 func (c *Coordinator) Done() bool {
 
 	c.mu.Lock()
@@ -434,9 +440,8 @@ func (c *Coordinator) Done() bool {
 	return allTasksCompleted(c.MapTasks) && allTasksCompleted(c.ReduceTasks)
 }
 
-// create a Coordinator.
-// main/mrcoordinator.go calls this function.
-// nReduce is the number of reduce tasks to use.
+// MakeCoordinator creates a new job and starts its RPC/HTTP server.
+// nReduce determines how many Reduce tasks (output partitions) are created.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
