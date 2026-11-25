@@ -11,19 +11,6 @@ import (
 	"strconv"
 )
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
-
-type ExampleArgs struct {
-	X int
-}
-
-type ExampleReply struct {
-	Y int
-}
-
 // Types of responses the coordinator can give to a worker.
 type TaskType string
 
@@ -81,6 +68,25 @@ type RegisterWorkerArgs struct {
 
 type RegisterWorkerReply struct {
 	WorkerID uint64
+}
+
+type HeartbeatArgs struct {
+	WorkerID uint64
+}
+
+type HeartbeatReply struct {
+	Accepted bool
+}
+
+type ReportMissingIntermediateArgs struct {
+	WorkerID        uint64
+	ReduceTaskID    int
+	ReduceAttemptID int
+	Location        FileLocation
+}
+
+type ReportMissingIntermediateReply struct {
+	Accepted bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name
