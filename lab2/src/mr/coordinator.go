@@ -18,18 +18,24 @@ const (
 
 // Task keeps the state and attempt history of a Map or Reduce task.
 type Task struct {
-	State           TaskState
-	InputFile       string    // Map tasks only
-	LastAssigned    time.Time // used to detect timed-out workers
-	AttemptsIssued  int       // next assigned attempt uses this counter
-	AcceptedAttempt int
-	Attempts        map[int]*AttemptInfo
-	OutputFiles     []string // Map: one file per reduce partition; Reduce: the final file
+	State             TaskState
+	InputFile         string // Map tasks only
+	LastAssigned      time.Time
+	AttemptsIssued    int
+	AcceptedAttempt   int
+	Attempts          map[int]*AttemptInfo
+	OutputFiles       []string // Map: one file per reduce partition; Reduce: the final file
+	CompletedDuration time.Duration
 }
 
 type AttemptInfo struct {
 	WorkerID   uint64
 	AssignedAt time.Time
+	Abandoned  bool // Worker has moved on from this attempt
+
+	// Progress is tracked in memory only.
+	Stage        TaskStage `json:"-"`
+	StageStarted time.Time `json:"-"`
 }
 
 type WorkerInfo struct {
@@ -53,11 +59,10 @@ type Coordinator struct {
 	NextWorkerID uint64
 
 	InputBaseURL string // HTTP address used to download Map inputs
-	StateFile    string // runtime config
+	StateFile    string // Path to the persistent state file
 }
 
 // MakeCoordinator creates or restores a job and starts its RPC/HTTP server.
-// nReduce determines how many Reduce tasks (output partitions) are created.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
@@ -71,7 +76,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	_, err := os.Stat(c.StateFile)
 
 	if err == nil {
-		// Restore a previous Coordinator state.
 		err = c.loadState()
 		if err != nil {
 			log.Fatalf("Error loading Coordinator state: %v", err)
@@ -98,7 +102,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		}
 
 	} else if os.IsNotExist(err) {
-		// No saved state: initialize a new job.
 		c.NReduce = nReduce
 
 		c.MapTasks = make([]Task, len(files))
@@ -133,7 +136,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	return &c
 }
 
-// Done is polled by the coordinator main process until both phases finish.
+// Done reports whether the MapReduce job has finished.
 func (c *Coordinator) Done() bool {
 
 	c.mu.Lock()

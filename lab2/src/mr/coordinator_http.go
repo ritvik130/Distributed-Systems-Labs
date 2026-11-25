@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // server serves RPC and file transfers through HTTP, preserving the Unix
@@ -18,12 +19,10 @@ func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
 
-	// Register file-transfer routes alongside the RPC endpoint.
 	http.HandleFunc("/inputs/", c.serveMapInput)
 
 	http.HandleFunc("/outputs", c.serveReduceOutput)
 
-	// Keep the existing Unix socket for RPC.
 	sockname := coordinatorSock()
 	os.Remove(sockname)
 
@@ -34,7 +33,6 @@ func (c *Coordinator) server() {
 
 	go http.Serve(l, nil)
 
-	// Start a TCP listener when an address is configured.
 	addr := os.Getenv("MR_COORDINATOR_HTTP_ADDR")
 	if addr != "" {
 		tcpListener, err := net.Listen("tcp", addr)
@@ -62,6 +60,7 @@ func (c *Coordinator) serveMapInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the file name under the lock, but serve the file without it.
 	c.mu.Lock()
 	fileName := c.MapTasks[taskID].InputFile
 	c.mu.Unlock()
@@ -90,7 +89,6 @@ func (c *Coordinator) serveReduceOutput(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Check the attempt before accepting an upload.
 	c.mu.Lock()
 	task := &c.ReduceTasks[taskID]
 	attempt, exists := task.Attempts[attemptID]
@@ -124,6 +122,7 @@ func (c *Coordinator) serveReduceOutput(w http.ResponseWriter, r *http.Request) 
 	tempName := outFile.Name()
 	defer os.Remove(tempName)
 
+	// Stream the request body to disk and make sure it is flushed.
 	_, copyErr := io.Copy(outFile, r.Body)
 	var syncErr error
 	if copyErr == nil {
@@ -136,10 +135,9 @@ func (c *Coordinator) serveReduceOutput(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Another attempt may have finished while this Worker was uploading.
 	c.mu.Lock()
 
-	// Recheck the winner after uploading, since the mutex was released.
+	// Another attempt may have won while the mutex was released.
 	if task.State == Completed {
 		accepted := task.AcceptedAttempt == attemptID
 		c.mu.Unlock()
@@ -151,7 +149,7 @@ func (c *Coordinator) serveReduceOutput(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Publish the winner and update its state while holding the same lock.
+	// Publish the output and commit its state under the same lock.
 	finalName := fmt.Sprintf("mr-out-%d", taskID)
 
 	err = os.Rename(tempName, finalName)
@@ -180,6 +178,7 @@ func (c *Coordinator) serveReduceOutput(w http.ResponseWriter, r *http.Request) 
 	task.State = Completed
 	task.AcceptedAttempt = attemptID
 	task.OutputFiles = []string{finalName}
+	task.CompletedDuration = time.Since(attempt.AssignedAt)
 
 	err = c.saveState()
 	if err != nil {

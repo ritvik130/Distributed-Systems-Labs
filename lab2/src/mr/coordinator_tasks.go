@@ -6,8 +6,6 @@ import (
 )
 
 // RequestTask assigns Map tasks first, then Reduce tasks once all Maps finish.
-// Unfinished tasks can be assigned again after 10 seconds; each assignment
-// gets a new AttemptID so the first accepted result can be identified.
 func (c *Coordinator) RequestTask(
 	args *RequestTaskArgs,
 	reply *RequestTaskReply,
@@ -15,10 +13,13 @@ func (c *Coordinator) RequestTask(
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	_, ok := c.Workers[args.WorkerID]
+	worker, ok := c.Workers[args.WorkerID]
 	if !ok {
 		return fmt.Errorf("Worker %d is not registered", args.WorkerID)
 	}
+
+	worker.LastSeen = time.Now()
+	worker.Alive = true
 
 	// Final outputs are sufficient even if a Map result was invalidated.
 	if len(c.ReduceTasks) > 0 && allTasksCompleted(c.ReduceTasks) {
@@ -26,126 +27,98 @@ func (c *Coordinator) RequestTask(
 		return nil
 	}
 
-	// Assign an idle Map task, or retry one that has been running too long.
-	for i := range c.MapTasks {
-		task := &c.MapTasks[i]
-
-		if task.State == Idle ||
-			(task.State == InProgress && time.Since(task.LastAssigned) >= 10*time.Second) {
-			previous := *task
-			task.State = InProgress
-			task.AttemptsIssued++
-			task.LastAssigned = time.Now()
-
-			// Remember which worker owns this attempt.
-			if task.Attempts == nil {
-				task.Attempts = make(map[int]*AttemptInfo)
-			}
-			task.Attempts[task.AttemptsIssued] = &AttemptInfo{
-				WorkerID:   args.WorkerID,
-				AssignedAt: task.LastAssigned,
-			}
-
-			// Do not keep an assignment in RAM if saving it fails.
-			err := c.saveState()
-			if err != nil {
-				delete(task.Attempts, task.AttemptsIssued)
-				*task = previous
-				return fmt.Errorf("error saving Map assignment: %w", err)
-			}
-
-			// Send the assigned task to the Worker.
-			reply.Type = MapTask
-			reply.TaskID = i
-			reply.AttemptID = task.AttemptsIssued
-			reply.InputFile = task.InputFile
-			reply.NReduce = c.NReduce
-
-			// The Worker downloads input from the Coordinator, not a shared disk.
-			if c.InputBaseURL != "" {
-				reply.InputURL = fmt.Sprintf("%s/inputs/%d", c.InputBaseURL, i)
-			}
-
-			return nil
-		}
+	// Workers request new work only after leaving their previous attempt.
+	err := c.abandonPreviousAttempts(args.WorkerID)
+	if err != nil {
+		return fmt.Errorf("error saving abandoned attempts: %w", err)
 	}
 
-	// Wait until all Map results have been accepted.
+	// Map phase.
 	if !allTasksCompleted(c.MapTasks) {
-		reply.Type = WaitTask
-		return nil
-	}
-
-	// Each Reduce task receives the accepted Map output for its partition.
-	for i := range c.ReduceTasks {
-		task := &c.ReduceTasks[i]
-
-		if task.State == Idle ||
-			(task.State == InProgress && time.Since(task.LastAssigned) >= 10*time.Second) {
-			previous := *task
-			task.State = InProgress
-			task.AttemptsIssued++
-			task.LastAssigned = time.Now()
-
-			if task.Attempts == nil {
-				task.Attempts = make(map[int]*AttemptInfo)
-			}
-
-			task.Attempts[task.AttemptsIssued] = &AttemptInfo{
-				WorkerID:   args.WorkerID,
-				AssignedAt: task.LastAssigned,
-			}
-
-			// Save Reduce attempts too; restore RAM if the write fails.
-			err := c.saveState()
-			if err != nil {
-				delete(task.Attempts, task.AttemptsIssued)
-				*task = previous
-				return fmt.Errorf("error saving Reduce assignment: %w", err)
-			}
-
-			reply.Type = ReduceTask
-			reply.TaskID = i
-			reply.AttemptID = task.AttemptsIssued
-
-			// Give the Reduce Worker the locations of its intermediate files.
-			for mapID, mapTask := range c.MapTasks {
-				attemptID := mapTask.AcceptedAttempt
-				workerID := mapTask.Attempts[attemptID].WorkerID
-				workerAddr := c.Workers[workerID].Address
-
-				location := FileLocation{
-					MapTaskID: mapID,
-					AttemptID: attemptID,
-					WorkerID:  workerID,
-					Address:   workerAddr,
-					FileName:  mapTask.OutputFiles[i],
-				}
-
-				reply.IntermediateLocations = append(
-					reply.IntermediateLocations,
-					location,
-				)
-
-				// Keep the Basic field until the Worker switches to locations.
-				reply.IntermediateFiles = append(
-					reply.IntermediateFiles,
-					mapTask.OutputFiles[i],
-				)
-			}
-
+		mapID := c.selectTask(c.MapTasks, args.WorkerID)
+		if mapID == -1 {
+			reply.Type = WaitTask
 			return nil
 		}
-	}
 
-	// Wait for the remaining Reduce results.
-	if !allTasksCompleted(c.ReduceTasks) {
-		reply.Type = WaitTask
+		task := &c.MapTasks[mapID]
+		err := c.assignAttempt(task, args.WorkerID)
+
+		if err != nil {
+			return fmt.Errorf("error saving Map assignment: %w", err)
+		}
+
+		reply.Type = MapTask
+		reply.TaskID = mapID
+		reply.AttemptID = task.AttemptsIssued
+		reply.InputFile = task.InputFile
+		reply.NReduce = c.NReduce
+
+		// Remote workers download the input over HTTP.
+		if c.InputBaseURL != "" {
+			reply.InputURL = fmt.Sprintf("%s/inputs/%d", c.InputBaseURL, mapID)
+		}
 		return nil
 	}
 
-	// Both phases are complete.
+	// Reduce phase.
+	if !allTasksCompleted(c.ReduceTasks) {
+		reduceID := c.selectTask(c.ReduceTasks, args.WorkerID)
+		if reduceID == -1 {
+			reply.Type = WaitTask
+			return nil
+		}
+
+		task := &c.ReduceTasks[reduceID]
+		err := c.assignAttempt(task, args.WorkerID)
+
+		if err != nil {
+			return fmt.Errorf("error saving Reduce assignment: %w", err)
+		}
+
+		reply.Type = ReduceTask
+		reply.TaskID = reduceID
+		reply.AttemptID = task.AttemptsIssued
+
+		// Give the Reduce Worker the locations of its intermediate files.
+		for mapID, mapTask := range c.MapTasks {
+			attemptID := mapTask.AcceptedAttempt
+			workerID := mapTask.Attempts[attemptID].WorkerID
+			location := FileLocation{
+				MapTaskID: mapID,
+				AttemptID: attemptID,
+				WorkerID:  workerID,
+				Address:   c.Workers[workerID].Address,
+				FileName:  mapTask.OutputFiles[reduceID],
+			}
+			reply.IntermediateLocations = append(reply.IntermediateLocations, location)
+		}
+		return nil
+	}
+
 	reply.Type = ExitTask
+	return nil
+}
+
+// assignAttempt creates and persists a new attempt. The caller must hold c.mu.
+func (c *Coordinator) assignAttempt(task *Task, workerID uint64) error {
+	previous := *task
+
+	task.State = InProgress
+	task.AttemptsIssued++
+	task.LastAssigned = time.Now()
+	if task.Attempts == nil {
+		task.Attempts = make(map[int]*AttemptInfo)
+	}
+	task.Attempts[task.AttemptsIssued] = &AttemptInfo{WorkerID: workerID, AssignedAt: task.LastAssigned}
+
+	// Undo the assignment if it cannot be saved.
+	err := c.saveState()
+	if err != nil {
+		delete(task.Attempts, task.AttemptsIssued)
+		*task = previous
+		return err
+	}
 	return nil
 }
 
@@ -158,7 +131,6 @@ func (c *Coordinator) ReportTask(
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Reduce outputs are handled through HTTP POST.
 	if args.Type != MapTask {
 		return nil
 	}
@@ -169,7 +141,6 @@ func (c *Coordinator) ReportTask(
 
 	task := &c.MapTasks[args.TaskID]
 
-	// Reject reports from unknown attempts or a different worker.
 	attempt, exists := task.Attempts[args.AttemptID]
 
 	if !exists || attempt == nil || attempt.WorkerID != args.WorkerID {
@@ -184,6 +155,7 @@ func (c *Coordinator) ReportTask(
 		return nil
 	}
 
+	// A failed attempt is handled when the worker requests new work or times out.
 	if !args.Success {
 		return nil
 	}
@@ -193,12 +165,13 @@ func (c *Coordinator) ReportTask(
 		return nil
 	}
 
-	// Record the accepted output locations for future Reduce assignments.
 	previous := *task
 	task.State = Completed
 	task.AcceptedAttempt = args.AttemptID
 	task.OutputFiles = args.OutputFiles
+	task.CompletedDuration = time.Since(attempt.AssignedAt)
 
+	// Roll back the completion if it cannot be persisted.
 	err := c.saveState()
 	if err != nil {
 		*task = previous

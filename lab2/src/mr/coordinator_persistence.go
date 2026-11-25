@@ -49,6 +49,7 @@ func (c *Coordinator) saveState() error {
 	tempName := tempFile.Name()
 	defer os.Remove(tempName)
 
+	// Write the data and flush it to disk before closing the temp file.
 	_, err = tempFile.Write(data)
 	if err != nil {
 		tempFile.Close()
