@@ -12,6 +12,7 @@ import (
 	"time"
 )
 
+// call sends an RPC to the Coordinator with bounded connection and call times.
 func call(
 	address string,
 	rpcname string,
@@ -31,6 +32,7 @@ func call(
 		return false
 	}
 
+	// Establish the HTTP CONNECT tunnel used by Go RPC.
 	_, err = fmt.Fprintf(
 		conn,
 		"CONNECT %s HTTP/1.0\n\n",
@@ -55,6 +57,7 @@ func call(
 		return false
 	}
 
+	// Use a fresh deadline for the RPC after the handshake.
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return false
 	}
@@ -70,6 +73,7 @@ func call(
 	return true
 }
 
+// generateToken creates a token reused when the Worker re-registers.
 func generateToken() (string, error) {
 	token := make([]byte, 16)
 
@@ -80,6 +84,7 @@ func generateToken() (string, error) {
 	return hex.EncodeToString(token), nil
 }
 
+// reportTask retries the same Map report until the Coordinator responds.
 func reportTask(
 	workerID uint64,
 	task *RequestTaskReply,
@@ -111,6 +116,7 @@ func reportTask(
 	}
 }
 
+// reportMissingIntermediate identifies the failed Reduce attempt and missing Map output.
 func reportMissingIntermediate(
 	workerID uint64,
 	task *RequestTaskReply,
@@ -140,6 +146,7 @@ func reportMissingIntermediate(
 	}
 }
 
+// heartbeat reports liveness and task progress independently of the task loop.
 func heartbeat(
     workerID *uint64,
     workerMu *sync.Mutex,
@@ -152,6 +159,7 @@ func heartbeat(
 		currentWorkerID := *workerID
 		workerMu.Unlock()
 
+		// Copy progress before the RPC so task execution can continue.
 		heartbeatArgs := progress.snapshot()
 		heartbeatArgs.WorkerID = currentWorkerID
 
@@ -171,6 +179,7 @@ func heartbeat(
 		} else if !heartbeatReply.Accepted {
 			fmt.Println("Coordinator rejected heartbeat. Re-registering...")
 
+			// Reuse the registration token to recover the existing Worker ID.
 			newReply := new(RegisterWorkerReply)
 
 			reRegister := call(

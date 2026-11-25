@@ -10,12 +10,14 @@ import (
 	"strings"
 )
 
+// intermediateHandler serves local intermediate files to Reduce workers.
 func intermediateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	// Accept a filename rather than a path to a file in another directory.
 	filename := strings.TrimPrefix(r.URL.Path, "/intermediate/")
 	if filename == "" || filepath.Base(filename) != filename {
 		http.Error(w, "Invalid filename", http.StatusBadRequest)
@@ -36,6 +38,7 @@ func intermediateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// getIP returns the first non-loopback IPv4 address with the given port.
 func getIP(port string) string {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -52,6 +55,7 @@ func getIP(port string) string {
 	return ""
 }
 
+// startWorkerServer starts the file server and returns its advertised address.
 func startWorkerServer() (string, error) {
 	port := envOrDefault("MR_WORKER_PORT", "5001")
 
@@ -70,6 +74,7 @@ func startWorkerServer() (string, error) {
 		}
 	}()
 
+	// Allow an explicit address when the detected interface is not suitable.
 	address := envOrDefault("MR_WORKER_PUBLIC_ADDR", getIP(port))
 	if address == "" {
 		listener.Close()

@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// RPC and file transfers can use separately configured Coordinator addresses.
 var coordinatorAddr = envOrDefault(
 	"MR_COORDINATOR_RPC_ADDR",
 	"localhost:5000",
@@ -32,6 +33,7 @@ func envOrDefault(key, fallback string) string {
 	return value
 }
 
+// progressState is shared by the task loop and the heartbeat goroutine.
 type progressState struct {
 	mu        sync.Mutex
 	taskType  TaskType
@@ -46,6 +48,7 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+// Worker registers with the Coordinator and executes one task at a time.
 func Worker(
 	mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string,
@@ -95,12 +98,14 @@ func Worker(
 
 	fmt.Println("Registered Worker with ID:", registerWorkerReply.WorkerID)
 
+	// Protect the Worker ID because heartbeat may re-register the process.
 	var workerMu sync.Mutex
 	workerID := registerWorkerReply.WorkerID
 
 	var progress progressState
 	progress.reset()
 	
+	// Report progress independently of task execution, even during mapf or reducef.
 	stopHeartbeat := make(chan struct{})
 	go heartbeat(
     	&workerID,
@@ -113,6 +118,7 @@ func Worker(
 
 taskLoop:
 	for {
+		// A new request tells the Coordinator that the previous attempt has ended.
 		progress.reset()
 		workerMu.Lock()
 		currentWorkerID := workerID
@@ -207,6 +213,7 @@ taskLoop:
 				if downloadErr != nil {
 					fmt.Println("Intermediate file unavailable. Reporting to Coordinator...")
 
+					// Let the Coordinator recover the missing Map output.
 					accepted := reportMissingIntermediate(
 						currentWorkerID,
 						reply,
@@ -250,6 +257,7 @@ taskLoop:
 	}
 }
 
+// cleanupFiles removes local files that are no longer needed.
 func cleanupFiles(files []string) {
 	for _, filename := range files {
 		if filename == "" {
@@ -262,6 +270,7 @@ func cleanupFiles(files []string) {
 	}
 }
 
+// setTask updates the attempt identity and its initial stage together.
 func (p *progressState) setTask(
 	taskType TaskType,
 	taskID int,
@@ -284,6 +293,7 @@ func (p *progressState) setStage(stage TaskStage) {
 	p.stage = stage
 }
 
+// snapshot copies the progress under the lock so RPC calls run without holding it.
 func (p *progressState) snapshot() HeartbeatArgs {
 	p.mu.Lock()
 	defer p.mu.Unlock()

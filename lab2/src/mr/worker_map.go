@@ -6,6 +6,7 @@ import (
 	"os"
 )
 
+// executeMap partitions Map output and reports the local intermediate files.
 func executeMap(
     workerID uint64,
     data []byte,
@@ -24,6 +25,7 @@ func executeMap(
 	progress.setStage(StageMapExecute)
 	kvs := mapf(fileName, string(data))
 
+	// Hash each key so all values for that key reach the same Reduce task.
 	progress.setStage(StageMapPartition)
 	partitions := make([][]KeyValue, reply.NReduce)
 
@@ -34,6 +36,7 @@ func executeMap(
 
 	intermediateFiles := make([]string, reply.NReduce)
 	
+	// Include the attempt ID to distinguish outputs from speculative copies.
 	progress.setStage(StageMapWrite)
 	for r, partition := range partitions {
 		filename := fmt.Sprintf(
@@ -80,8 +83,8 @@ func executeMap(
 		intermediateFiles[r] = filename
 	}
 	progress.setStage(StageMapReport)
-	// Keep files if the RPC response is lost.
-	// The Coordinator may already have accepted the result.
+	// Report only after all partition files are closed. Keep them until
+	// the Coordinator confirms whether this attempt won.
 	if !reportTask(workerID, reply, true, intermediateFiles) {
 		cleanupFiles(intermediateFiles)
 	}
