@@ -21,6 +21,25 @@ const (
 	ExitTask   TaskType = "exit"
 )
 
+type TaskStage int
+
+const (
+	StageIdle TaskStage = iota
+
+	// Map stages
+	StageMapDownload
+	StageMapExecute
+	StageMapPartition
+	StageMapWrite
+	StageMapReport
+
+	// Reduce stages
+	StageReduceDownload
+	StageReduceDecodeSort
+	StageReduceExecuteWrite
+	StageReduceUpload
+)
+
 // Worker requests a new task from the coordinator.
 type RequestTaskArgs struct {
 	WorkerID uint64
@@ -42,7 +61,6 @@ type RequestTaskReply struct {
 	InputFile             string
 	InputURL              string
 	NReduce               int
-	IntermediateFiles     []string
 	IntermediateLocations []FileLocation
 }
 
@@ -71,7 +89,11 @@ type RegisterWorkerReply struct {
 }
 
 type HeartbeatArgs struct {
-	WorkerID uint64
+	WorkerID  uint64
+	TaskType  TaskType
+	TaskID    int
+	AttemptID int
+	Stage     TaskStage
 }
 
 type HeartbeatReply struct {

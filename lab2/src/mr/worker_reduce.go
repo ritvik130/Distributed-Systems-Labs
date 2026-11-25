@@ -9,14 +9,18 @@ import (
 	"sort"
 )
 
+// executeReduce groups intermediate values and uploads the final result.
 func executeReduce(
-	workerID uint64,
-	content [][]byte,
-	reducef func(string, []string) string,
-	reply *RequestTaskReply,
+    workerID uint64,
+    content [][]byte,
+    reducef func(string, []string) string,
+    reply *RequestTaskReply,
+    progress *progressState,
 ) {
 	data := make(map[string][]string)
 
+	// Combine values for each key across all downloaded Map partitions.
+	progress.setStage(StageReduceDecodeSort)
 	for _, c := range content {
 		decoder := json.NewDecoder(bytes.NewReader(c))
 
@@ -42,9 +46,11 @@ func executeReduce(
 	for key := range data {
 		keys = append(keys, key)
 	}
-
+	// Sort the keys for deterministic output order.
 	sort.Strings(keys)
 
+	// Write to an attempt-specific local file before uploading.
+	progress.setStage(StageReduceExecuteWrite)
 	outputFile := fmt.Sprintf(
 		"reduce-%d-a%d",
 		reply.TaskID,
@@ -79,7 +85,8 @@ func executeReduce(
 		cleanupFiles([]string{outputFile})
 		return
 	}
-
+	
+	progress.setStage(StageReduceUpload)
 	accepted, err := sendFile(workerID, reply, outputFile)
 
 	if err != nil {
@@ -94,6 +101,6 @@ func executeReduce(
 		fmt.Println("Reduce output was not accepted; another attempt may have won")
 	}
 
-	// 200, 403 and 409 are definitive responses.
+	// The Coordinator owns the final output; this local copy is no longer needed.
 	cleanupFiles([]string{outputFile})
 }

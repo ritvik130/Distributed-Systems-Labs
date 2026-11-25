@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// getFile downloads a Map input or intermediate file with an HTTP timeout.
 func getFile(url string) ([]byte, error) {
 	client := &http.Client{
 		Timeout: 10 * time.Second,
@@ -32,6 +33,7 @@ func getFile(url string) ([]byte, error) {
 	return data, nil
 }
 
+// getIntermediateFiles fetches the file from the Worker that produced it.
 func getIntermediateFiles(location FileLocation) ([]byte, error) {
 	url := fmt.Sprintf(
 		"http://%s/intermediate/%s",
@@ -42,11 +44,13 @@ func getIntermediateFiles(location FileLocation) ([]byte, error) {
 	return getFile(url)
 }
 
+// sendFile uploads a Reduce result and retries temporary failures.
 func sendFile(
 	workerID uint64,
 	task *RequestTaskReply,
 	outputFile string,
 ) (bool, error) {
+	// Identify the attempt so the Coordinator can enforce first-finisher-wins.
 	url := fmt.Sprintf(
 		"%s/outputs?task=%d&attempt=%d&worker=%d",
 		coordinatorHTTPURL,
@@ -64,6 +68,7 @@ func sendFile(
 		Timeout: 10 * time.Second,
 	}
 
+	// Recreate the request body for each upload retry.
 	for {
 		req, err := http.NewRequest(
 			http.MethodPost,
@@ -85,6 +90,7 @@ func sendFile(
 		status := resp.StatusCode
 		resp.Body.Close()
 
+		// A conflict or forbidden response ends the attempt without another retry.
 		switch status {
 		case http.StatusOK:
 			return true, nil
