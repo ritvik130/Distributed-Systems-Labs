@@ -46,6 +46,7 @@ func (c *Coordinator) RegisterWorker(
 		}
 
 		c.WorkerTokens[args.RegistrationToken] = workerID
+
 	} else {
 		c.Workers[workerID].Address = args.Address
 		c.Workers[workerID].LastSeen = time.Now()
@@ -70,7 +71,7 @@ func (c *Coordinator) RegisterWorker(
 	return nil
 }
 
-// Heartbeat updates the last time a registered Worker was seen.
+// Heartbeat updates Worker liveness and current task progress.
 func (c *Coordinator) Heartbeat(
 	args *HeartbeatArgs,
 	reply *HeartbeatReply,
@@ -84,15 +85,45 @@ func (c *Coordinator) Heartbeat(
 		reply.Accepted = false
 		return nil
 	}
+
 	worker.LastSeen = time.Now()
 	worker.Alive = true
-
 	reply.Accepted = true
+
+	// Idle heartbeats only update liveness.
+	if args.Stage == StageIdle {
+		return nil
+	}
+
+	var task *Task
+
+	if args.TaskType == MapTask {
+		task = &c.MapTasks[args.TaskID]
+	} else {
+		task = &c.ReduceTasks[args.TaskID]
+	}
+
+	if task.State != InProgress {
+		return nil
+	}
+
+	attempt := task.Attempts[args.AttemptID]
+
+	// Ignore progress from invalidated or abandoned attempts.
+	if attempt == nil || attempt.Abandoned {
+		return nil
+	}
+
+	// Do not reset the stage timer for repeated or older heartbeats.
+	if args.Stage > attempt.Stage {
+		attempt.Stage = args.Stage
+		attempt.StageStarted = time.Now()
+	}
 
 	return nil
 }
 
-// Periodically check whether registered workers are still reachable.
+// monitorWorkers checks worker liveness until the job finishes.
 func (c *Coordinator) monitorWorkers() {
 	ticker := time.NewTicker(monitorInterval)
 	defer ticker.Stop()
@@ -105,7 +136,7 @@ func (c *Coordinator) monitorWorkers() {
 	}
 }
 
-// Detect workers that have stopped sending heartbeats.
+// checkWorkers marks workers as unreachable after the timeout.
 func (c *Coordinator) checkWorkers() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -120,7 +151,7 @@ func (c *Coordinator) checkWorkers() {
 	}
 }
 
-// Handle a Reduce Worker that cannot download a required Map output.
+// ReportMissingIntermediate handles a Reduce worker that cannot fetch a Map output.
 func (c *Coordinator) ReportMissingIntermediate(
 	args *ReportMissingIntermediateArgs,
 	reply *ReportMissingIntermediateReply,
@@ -130,7 +161,6 @@ func (c *Coordinator) ReportMissingIntermediate(
 
 	location := args.Location
 
-	// Validate task IDs.
 	if args.ReduceTaskID < 0 || args.ReduceTaskID >= len(c.ReduceTasks) ||
 		location.MapTaskID < 0 || location.MapTaskID >= len(c.MapTasks) {
 		return nil
@@ -139,7 +169,6 @@ func (c *Coordinator) ReportMissingIntermediate(
 	reduceTask := &c.ReduceTasks[args.ReduceTaskID]
 	mapTask := &c.MapTasks[location.MapTaskID]
 
-	// Check that the reporting Reduce attempt is still valid.
 	attempt := reduceTask.Attempts[args.ReduceAttemptID]
 
 	if reduceTask.State != InProgress ||
@@ -159,6 +188,7 @@ func (c *Coordinator) ReportMissingIntermediate(
 	// Remove the failed Reduce attempt without interrupting other attempts.
 	delete(reduceTask.Attempts, args.ReduceAttemptID)
 
+	// No attempts left: the Reduce task goes back to Idle.
 	if len(reduceTask.Attempts) == 0 {
 		reduceTask.State = Idle
 		reduceTask.LastAssigned = time.Time{}
@@ -192,7 +222,7 @@ func (c *Coordinator) ReportMissingIntermediate(
 	return nil
 }
 
-// Invalidate a Map result that is no longer available.
+// invalidateMapOutput resets a Map task whose accepted output was lost.
 // The caller must hold c.mu.
 func (c *Coordinator) invalidateMapOutput(mapID, attemptID int) bool {
 	if mapID < 0 || mapID >= len(c.MapTasks) {
@@ -206,11 +236,13 @@ func (c *Coordinator) invalidateMapOutput(mapID, attemptID int) bool {
 		return false
 	}
 
+	// Reset the task so the scheduler treats it as new work.
 	task.State = Idle
 	task.AcceptedAttempt = 0
 	task.Attempts = nil
 	task.OutputFiles = nil
 	task.LastAssigned = time.Time{}
+	task.CompletedDuration = 0
 
 	return true
 }
