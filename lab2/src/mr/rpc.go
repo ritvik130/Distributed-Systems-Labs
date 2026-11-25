@@ -1,5 +1,11 @@
 package mr
 
+//
+// RPC definitions.
+//
+// remember to capitalize all names.
+//
+
 import (
 	"os"
 	"strconv"
@@ -15,8 +21,7 @@ const (
 	ExitTask   TaskType = "exit"
 )
 
-// Worker requests a new task from the Coordinator.
-
+// Worker requests a new task from the coordinator.
 type RequestTaskArgs struct {
 	WorkerID uint64
 }
@@ -29,8 +34,7 @@ type FileLocation struct {
 	FileName  string
 }
 
-// Coordinator responds with a task or tells the Worker to wait or exit.
-
+// Coordinator responds with a task or tells the worker to wait or exit.
 type RequestTaskReply struct {
 	Type                  TaskType
 	TaskID                int
@@ -40,20 +44,10 @@ type RequestTaskReply struct {
 	NReduce               int
 	IntermediateFiles     []string
 	IntermediateLocations []FileLocation
-	Type                  TaskType
-	TaskID                int
-	AttemptID             int
-	InputFile             string
-	InputURL              string
-	NReduce               int
-	IntermediateFiles     []string
-	IntermediateLocations []FileLocation
 }
 
-// Worker reports the result of a completed or failed Map task.
-
+// Worker reports the result of a completed or failed task.
 type ReportTaskArgs struct {
-	WorkerID    uint64
 	WorkerID    uint64
 	Type        TaskType
 	TaskID      int
@@ -62,6 +56,7 @@ type ReportTaskArgs struct {
 	OutputFiles []string
 }
 
+// Coordinator tells the worker whether its result was accepted.
 type ReportTaskReply struct {
 	Accepted bool
 }
