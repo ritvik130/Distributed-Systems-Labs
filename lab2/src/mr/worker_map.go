@@ -7,20 +7,24 @@ import (
 )
 
 func executeMap(
-	workerID uint64,
-	data []byte,
-	fileName string,
-	mapf func(string, string) []KeyValue,
-	reply *RequestTaskReply,
+    workerID uint64,
+    data []byte,
+    fileName string,
+    mapf func(string, string) []KeyValue,
+    reply *RequestTaskReply,
+    progress *progressState,
 ) {
 	if reply.NReduce <= 0 {
 		fmt.Println("Invalid number of reduce tasks")
+		progress.setStage(StageMapReport)
 		reportTask(workerID, reply, false, nil)
 		return
 	}
 
+	progress.setStage(StageMapExecute)
 	kvs := mapf(fileName, string(data))
 
+	progress.setStage(StageMapPartition)
 	partitions := make([][]KeyValue, reply.NReduce)
 
 	for _, kv := range kvs {
@@ -29,7 +33,8 @@ func executeMap(
 	}
 
 	intermediateFiles := make([]string, reply.NReduce)
-
+	
+	progress.setStage(StageMapWrite)
 	for r, partition := range partitions {
 		filename := fmt.Sprintf(
 			"mr-%d-%d-%d",
@@ -42,6 +47,7 @@ func executeMap(
 		if err != nil {
 			fmt.Println("Error creating intermediate file:", err)
 			cleanupFiles(intermediateFiles)
+			progress.setStage(StageMapReport)
 			reportTask(workerID, reply, false, nil)
 			return
 		}
@@ -66,13 +72,14 @@ func executeMap(
 
 			os.Remove(filename)
 			cleanupFiles(intermediateFiles)
+			progress.setStage(StageMapReport)
 			reportTask(workerID, reply, false, nil)
 			return
 		}
 
 		intermediateFiles[r] = filename
 	}
-
+	progress.setStage(StageMapReport)
 	// Keep files if the RPC response is lost.
 	// The Coordinator may already have accepted the result.
 	if !reportTask(workerID, reply, true, intermediateFiles) {

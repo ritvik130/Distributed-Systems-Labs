@@ -32,6 +32,14 @@ func envOrDefault(key, fallback string) string {
 	return value
 }
 
+type progressState struct {
+	mu        sync.Mutex
+	taskType  TaskType
+	taskID    int
+	attemptID int
+	stage     TaskStage
+}
+
 func ihash(key string) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(key))
@@ -87,22 +95,25 @@ func Worker(
 
 	fmt.Println("Registered Worker with ID:", registerWorkerReply.WorkerID)
 
-	// WorkerID is shared between the main goroutine and heartbeat.
 	var workerMu sync.Mutex
 	workerID := registerWorkerReply.WorkerID
 
+	var progress progressState
+	progress.reset()
+	
 	stopHeartbeat := make(chan struct{})
 	go heartbeat(
-		&workerID,
-		&workerMu,
-		registerWorkerArgs,
-		stopHeartbeat,
+    	&workerID,
+    	&workerMu,
+    	&progress,
+    	registerWorkerArgs,
+    	stopHeartbeat,
 	)
-
 	defer close(stopHeartbeat)
 
 taskLoop:
 	for {
+		progress.reset()
 		workerMu.Lock()
 		currentWorkerID := workerID
 		workerMu.Unlock()
@@ -129,6 +140,12 @@ taskLoop:
 		switch reply.Type {
 
 		case MapTask:
+			progress.setTask(
+    			MapTask,
+    			reply.TaskID,
+    			reply.AttemptID,
+    			StageMapDownload,
+			)
 			// Keep retrying the same input download.
 			var data []byte
 
@@ -149,9 +166,16 @@ taskLoop:
 				reply.InputFile,
 				mapf,
 				reply,
+				&progress,
 			)
 
 		case ReduceTask:
+			progress.setTask(
+    			ReduceTask,
+    			reply.TaskID,
+    			reply.AttemptID,
+    			StageReduceDownload,
+			)
 			reduceData := make([][]byte, len(reply.IntermediateLocations))
 
 			// Download each required intermediate file.
@@ -207,12 +231,15 @@ taskLoop:
 				reduceData,
 				reducef,
 				reply,
+				&progress, 
 			)
 
 		case WaitTask:
+			progress.reset()
 			time.Sleep(300 * time.Millisecond)
 
 		case ExitTask:
+			progress.reset()
 			fmt.Println("Coordinator says the job is complete. Exiting.")
 			return
 
@@ -233,4 +260,42 @@ func cleanupFiles(files []string) {
 			fmt.Println("Error removing file:", err)
 		}
 	}
+}
+
+func (p *progressState) setTask(
+	taskType TaskType,
+	taskID int,
+	attemptID int,
+	stage TaskStage,
+) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.taskType = taskType
+	p.taskID = taskID
+	p.attemptID = attemptID
+	p.stage = stage
+}
+
+func (p *progressState) setStage(stage TaskStage) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.stage = stage
+}
+
+func (p *progressState) snapshot() HeartbeatArgs {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return HeartbeatArgs{
+		TaskType:  p.taskType,
+		TaskID:    p.taskID,
+		AttemptID: p.attemptID,
+		Stage:     p.stage,
+	}
+}
+
+func (p *progressState) reset() {
+	p.setTask(WaitTask, -1, -1, StageIdle)
 }

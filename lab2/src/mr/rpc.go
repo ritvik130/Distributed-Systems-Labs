@@ -70,8 +70,29 @@ type RegisterWorkerReply struct {
 	WorkerID uint64
 }
 
+type TaskStage int
+
+const (
+	StageIdle TaskStage = iota
+
+	StageMapDownload
+	StageMapExecute
+	StageMapPartition
+	StageMapWrite
+	StageMapReport
+
+	StageReduceDownload
+	StageReduceDecodeSort
+	StageReduceExecuteWrite
+	StageReduceUpload
+)
+
 type HeartbeatArgs struct {
-	WorkerID uint64
+	WorkerID  uint64
+	TaskType  TaskType
+	TaskID    int
+	AttemptID int
+	Stage     TaskStage
 }
 
 type HeartbeatReply struct {

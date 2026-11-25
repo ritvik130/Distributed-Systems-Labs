@@ -141,19 +141,19 @@ func reportMissingIntermediate(
 }
 
 func heartbeat(
-	workerID *uint64,
-	workerMu *sync.Mutex,
-	registerWorkerArgs *RegisterWorkerArgs,
-	stopHeartbeat <-chan struct{},
+    workerID *uint64,
+    workerMu *sync.Mutex,
+    progress *progressState,
+    registerWorkerArgs *RegisterWorkerArgs,
+    stopHeartbeat <-chan struct{},
 ) {
 	for {
 		workerMu.Lock()
 		currentWorkerID := *workerID
 		workerMu.Unlock()
 
-		heartbeatArgs := &HeartbeatArgs{
-			WorkerID: currentWorkerID,
-		}
+		heartbeatArgs := progress.snapshot()
+		heartbeatArgs.WorkerID = currentWorkerID
 
 		heartbeatReply := new(HeartbeatReply)
 
