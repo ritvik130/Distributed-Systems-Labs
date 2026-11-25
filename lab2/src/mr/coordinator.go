@@ -1,17 +1,13 @@
 package mr
 
 import (
-	"fmt"
 	"log"
-	"net"
-	"net/http"
-	"net/rpc"
 	"os"
 	"sync"
 	"time"
 )
 
-// TaskState is the lifecycle stage of a Map or Reduce task.
+// TaskState tracks whether a task is waiting, running, or finished.
 type TaskState string
 
 const (
@@ -20,239 +16,132 @@ const (
 	Completed  TaskState = "completed"
 )
 
-// Task is the coordinator's bookkeeping for one Map or Reduce task.
+// Task keeps the state and attempt history of a Map or Reduce task.
 type Task struct {
 	State           TaskState
 	InputFile       string    // Map tasks only
 	LastAssigned    time.Time // used to detect timed-out workers
-	AttemptsIssued  int       // also serves as the latest AttemptID
+	AttemptsIssued  int       // next assigned attempt uses this counter
 	AcceptedAttempt int
+	Attempts        map[int]*AttemptInfo
 	OutputFiles     []string // Map: one file per reduce partition; Reduce: the final file
 }
 
-// Coordinator hands out tasks to workers and tracks their progress.
+type AttemptInfo struct {
+	WorkerID   uint64
+	AssignedAt time.Time
+}
+
+type WorkerInfo struct {
+	ID       uint64
+	Address  string
+	Token    string
+	LastSeen time.Time `json:"-"`
+	Alive    bool      `json:"-"`
+}
+
+// Coordinator assigns tasks and keeps track of workers and accepted results.
 type Coordinator struct {
-	mu          sync.Mutex // RPC handlers run concurrently
+	mu          sync.Mutex
 	MapTasks    []Task
 	ReduceTasks []Task
 	NReduce     int
+
+	// Worker registration and reconnect information.
+	Workers      map[uint64]*WorkerInfo
+	WorkerTokens map[string]uint64
+	NextWorkerID uint64
+
+	InputBaseURL string // HTTP address used to download Map inputs
+	StateFile    string // runtime config
 }
 
-// allTasksCompleted reports whether every task in the slice is Completed.
-func allTasksCompleted(tasks []Task) bool {
-	for _, task := range tasks {
-		if task.State != Completed {
-			return false
-		}
+// MakeCoordinator creates or restores a job and starts its RPC/HTTP server.
+// nReduce determines how many Reduce tasks (output partitions) are created.
+func MakeCoordinator(files []string, nReduce int) *Coordinator {
+	c := Coordinator{}
+
+	c.InputBaseURL = os.Getenv("MR_COORDINATOR_PUBLIC_URL")
+	c.StateFile = os.Getenv("MR_COORDINATOR_STATE_FILE")
+
+	if c.StateFile == "" {
+		c.StateFile = "coordinator-state.json"
 	}
 
-	return true
-}
+	_, err := os.Stat(c.StateFile)
 
-// RequestTask is the RPC handler workers call to ask for work.
-//
-// Map tasks are handed out first, then Reduce tasks (only after all Map
-// tasks are done), then ExitTask. A task is assignable if it is idle or has
-// been in progress for 10s or more, in which case the worker is timed out.
-func (c *Coordinator) RequestTask(
-	args *RequestTaskArgs,
-	reply *RequestTaskReply,
-) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Find the first available Map task
-	for i := range c.MapTasks {
-		task := &c.MapTasks[i]
-
-		if task.State == Idle ||
-			(task.State == InProgress && time.Since(task.LastAssigned) >= 10*time.Second) {
-			task.State = InProgress
-			task.AttemptsIssued++
-			task.LastAssigned = time.Now()
-
-			reply.Type = MapTask
-			reply.TaskID = i
-			reply.AttemptID = task.AttemptsIssued
-			reply.InputFile = task.InputFile
-			reply.NReduce = c.NReduce
-
-			return nil
-		}
-	}
-
-	// No idle Map tasks, but some are still running.
-	if !allTasksCompleted(c.MapTasks) {
-		reply.Type = WaitTask
-		return nil
-	}
-
-	// All Map tasks are completed. Assign a Reduce task.
-	for i := range c.ReduceTasks {
-		task := &c.ReduceTasks[i]
-
-		if task.State == Idle ||
-			(task.State == InProgress && time.Since(task.LastAssigned) >= 10*time.Second) {
-			task.State = InProgress
-			task.AttemptsIssued++
-			task.LastAssigned = time.Now()
-
-			reply.Type = ReduceTask
-			reply.TaskID = i
-			reply.AttemptID = task.AttemptsIssued
-
-			// Reduce task i reads partition i from every Map task's output.
-			for _, mapTask := range c.MapTasks {
-				reply.IntermediateFiles = append(
-					reply.IntermediateFiles,
-					mapTask.OutputFiles[i],
-				)
-			}
-
-			return nil
-		}
-	}
-
-	// No idle Reduce tasks, but some are still running
-	if !allTasksCompleted(c.ReduceTasks) {
-		reply.Type = WaitTask
-		return nil
-	}
-
-	// Otherwise all tasks are completed
-	reply.Type = ExitTask
-	return nil
-}
-
-// ReportTask is the RPC handler workers call to report a task's result.
-//
-// Invalid, stale, duplicate and failed reports are ignored. Only the first
-// valid successful report for a task is accepted (reply.Accepted = true).
-func (c *Coordinator) ReportTask(
-	args *ReportTaskArgs,
-	reply *ReportTaskReply,
-) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	var task *Task
-
-	switch args.Type {
-	case MapTask:
-		if args.TaskID < 0 || args.TaskID >= len(c.MapTasks) {
-			return nil
-		}
-		task = &c.MapTasks[args.TaskID]
-	case ReduceTask:
-		if args.TaskID < 0 || args.TaskID >= len(c.ReduceTasks) {
-			return nil
-		}
-		task = &c.ReduceTasks[args.TaskID]
-	default:
-		return nil
-	}
-
-	// Accept duplicate reports from the attempt that already completed the task.
-	if task.State == Completed {
-		if args.Success && args.AttemptID == task.AcceptedAttempt {
-			reply.Accepted = true
-		}
-		return nil
-	}
-	if args.AttemptID <= 0 || args.AttemptID > task.AttemptsIssued {
-		return nil
-	}
-	if !args.Success {
-		return nil
-	}
-	// check output files
-	if args.Type == MapTask && len(args.OutputFiles) != c.NReduce {
-		return nil
-	}
-	if args.Type == ReduceTask && len(args.OutputFiles) != 1 {
-		return nil
-	}
-
-	if args.Type == MapTask {
-		task.State = Completed
-		task.AcceptedAttempt = args.AttemptID
-		task.OutputFiles = args.OutputFiles
-		reply.Accepted = true
-	}
-	if args.Type == ReduceTask {
-		// 1. Construct the final output filename.
-		oldpath := args.OutputFiles[0]
-		newpath := fmt.Sprintf("mr-out-%d", args.TaskID)
-		// 2. Rename the worker's output file. Doing this only on acceptance
-		// ensures just one attempt's output becomes the final file.
-		err := os.Rename(oldpath, newpath)
+	if err == nil {
+		// Restore a previous Coordinator state.
+		err = c.loadState()
 		if err != nil {
-			return nil
+			log.Fatalf("Error loading Coordinator state: %v", err)
 		}
-		task.State = Completed
-		task.AcceptedAttempt = args.AttemptID
-		task.OutputFiles = []string{newpath}
-		reply.Accepted = true
+
+		// Make sure the saved state belongs to this job.
+		if c.NReduce != nReduce || len(c.MapTasks) != len(files) || len(c.ReduceTasks) != nReduce {
+			log.Fatal("Saved state does not match the current job")
+		}
+
+		for i, file := range files {
+			if c.MapTasks[i].InputFile != file {
+				log.Fatal("Saved input files do not match the current job")
+			}
+		}
+		if c.Workers == nil || c.WorkerTokens == nil {
+			log.Fatal("Saved worker state is missing")
+		}
+
+		// Give workers time to reconnect after a Coordinator restart.
+		for _, worker := range c.Workers {
+			worker.LastSeen = time.Now()
+			worker.Alive = true
+		}
+
+	} else if os.IsNotExist(err) {
+		// No saved state: initialize a new job.
+		c.NReduce = nReduce
+
+		c.MapTasks = make([]Task, len(files))
+		for i, file := range files {
+			c.MapTasks[i] = Task{
+				State:     Idle,
+				InputFile: file,
+			}
+		}
+
+		c.ReduceTasks = make([]Task, nReduce)
+		for i := 0; i < nReduce; i++ {
+			c.ReduceTasks[i].State = Idle
+		}
+
+		c.Workers = make(map[uint64]*WorkerInfo)
+		c.WorkerTokens = make(map[string]uint64)
+		c.NextWorkerID = 0
+
+		// Save the initial job before accepting Worker requests.
+		err = c.saveState()
+		if err != nil {
+			log.Fatalf("Error saving initial state: %v", err)
+		}
+
+	} else {
+		log.Fatalf("Error checking state file: %v", err)
 	}
 
-	return nil
-
+	c.server()
+	go c.monitorWorkers()
+	return &c
 }
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
-
-// start a thread that listens for RPCs from worker.go
-func (c *Coordinator) server() {
-	rpc.Register(c)
-	rpc.HandleHTTP()
-	//l, e := net.Listen("tcp", ":1234")
-	sockname := coordinatorSock()
-	os.Remove(sockname)
-	l, e := net.Listen("unix", sockname)
-	if e != nil {
-		log.Fatal("listen error:", e)
-	}
-	go http.Serve(l, nil)
-}
-
-// main/mrcoordinator.go calls Done() periodically to find out
-// if the entire job has finished.
+// Done is polled by the coordinator main process until both phases finish.
 func (c *Coordinator) Done() bool {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return allTasksCompleted(c.MapTasks) && allTasksCompleted(c.ReduceTasks)
-}
-
-// create a Coordinator.
-// main/mrcoordinator.go calls this function.
-// nReduce is the number of reduce tasks to use.
-func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-
-	c.NReduce = nReduce
-
-	// One Map task per input file.
-	c.MapTasks = make([]Task, len(files))
-	for i, file := range files {
-		c.MapTasks[i] = Task{
-			State:     Idle,
-			InputFile: file,
-		}
+	if len(c.ReduceTasks) > 0 {
+		return allTasksCompleted(c.ReduceTasks)
 	}
 
-	c.ReduceTasks = make([]Task, nReduce)
-	for i := 0; i < nReduce; i++ {
-		c.ReduceTasks[i].State = Idle
-	}
-
-	c.server()
-	return &c
+	return allTasksCompleted(c.MapTasks)
 }
