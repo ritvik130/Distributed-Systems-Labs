@@ -60,6 +60,8 @@ type Coordinator struct {
 
 	InputBaseURL string // HTTP address used to download Map inputs
 	StateFile    string // Path to the persistent state file
+
+	JobDoneAt time.Time
 }
 
 // MakeCoordinator creates or restores a job and starts its RPC/HTTP server.
@@ -136,15 +138,29 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	return &c
 }
 
-// Done reports whether the MapReduce job has finished.
+// Done reports whether the job has finished
+// and allows Workers time to receive the shutdown signal.
 func (c *Coordinator) Done() bool {
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	completed := false
+
 	if len(c.ReduceTasks) > 0 {
-		return allTasksCompleted(c.ReduceTasks)
+		completed = allTasksCompleted(c.ReduceTasks)
+	} else {
+		completed = allTasksCompleted(c.MapTasks)
 	}
 
-	return allTasksCompleted(c.MapTasks)
+	if !completed {
+		return false
+	}
+
+	// Record when the job was first observed as complete.
+	if c.JobDoneAt.IsZero() {
+		c.JobDoneAt = time.Now()
+	}
+
+	// Keep the Coordinator available for final heartbeats.
+	return time.Since(c.JobDoneAt) >= 4*time.Second
 }

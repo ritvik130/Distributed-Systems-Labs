@@ -28,6 +28,5 @@ func main() {
 		time.Sleep(time.Second)
 	}
 
-	// Allow Workers to receive the shutdown signal.
-	time.Sleep(5 * time.Second)
+	time.Sleep(time.Second)
 }
