@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/rpc"
+	"os"
 	"sync"
 	"time"
 )
@@ -171,6 +172,11 @@ func heartbeat(
 			heartbeatReply,
 		)
 
+		// Stop the Worker even if a losing attempt is still running.
+		if ok && heartbeatReply.Accepted && heartbeatReply.JobDone {
+			fmt.Println("Job completed. Shutting down Worker.")
+			os.Exit(0)
+		}
 		if !ok {
 			// Coordinator may be temporarily unavailable.
 			// Keep the Worker alive and retry.

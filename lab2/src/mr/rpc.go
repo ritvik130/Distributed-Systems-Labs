@@ -98,6 +98,7 @@ type HeartbeatArgs struct {
 
 type HeartbeatReply struct {
 	Accepted bool
+	JobDone  bool
 }
 
 type ReportMissingIntermediateArgs struct {

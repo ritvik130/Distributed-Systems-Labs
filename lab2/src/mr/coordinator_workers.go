@@ -90,6 +90,12 @@ func (c *Coordinator) Heartbeat(
 	worker.Alive = true
 	reply.Accepted = true
 
+	// Notify the Worker when the entire job is complete.
+	if len(c.ReduceTasks) > 0 && allTasksCompleted(c.ReduceTasks) {
+		reply.JobDone = true
+		return nil
+	}
+
 	// Idle heartbeats only update liveness.
 	if args.Stage == StageIdle {
 		return nil
