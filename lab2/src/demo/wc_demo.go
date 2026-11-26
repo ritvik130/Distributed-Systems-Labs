@@ -26,7 +26,7 @@ func Map(filename string, contents string) []mr.KeyValue {
 	fmt.Println("Map started:", filename)
 	// Make the demo slow enough to observe in the terminal.
 	time.Sleep(2 * time.Second)
-	if os.Getenv("SLOW_WORKER") == "1" && filename == "b.txt" {
+	if os.Getenv("SLOW_MAP") == "1" && filename == "b.txt" {
 		fmt.Println("Simulating a slow Map:", filename)
 		time.Sleep(30 * time.Second)
 	}
