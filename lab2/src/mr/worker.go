@@ -104,15 +104,15 @@ func Worker(
 
 	var progress progressState
 	progress.reset()
-	
+
 	// Report progress independently of task execution, even during mapf or reducef.
 	stopHeartbeat := make(chan struct{})
 	go heartbeat(
-    	&workerID,
-    	&workerMu,
-    	&progress,
-    	registerWorkerArgs,
-    	stopHeartbeat,
+		&workerID,
+		&workerMu,
+		&progress,
+		registerWorkerArgs,
+		stopHeartbeat,
 	)
 	defer close(stopHeartbeat)
 
@@ -147,10 +147,10 @@ taskLoop:
 
 		case MapTask:
 			progress.setTask(
-    			MapTask,
-    			reply.TaskID,
-    			reply.AttemptID,
-    			StageMapDownload,
+				MapTask,
+				reply.TaskID,
+				reply.AttemptID,
+				StageMapDownload,
 			)
 			// Keep retrying the same input download.
 			var data []byte
@@ -177,10 +177,10 @@ taskLoop:
 
 		case ReduceTask:
 			progress.setTask(
-    			ReduceTask,
-    			reply.TaskID,
-    			reply.AttemptID,
-    			StageReduceDownload,
+				ReduceTask,
+				reply.TaskID,
+				reply.AttemptID,
+				StageReduceDownload,
 			)
 			reduceData := make([][]byte, len(reply.IntermediateLocations))
 
@@ -238,7 +238,7 @@ taskLoop:
 				reduceData,
 				reducef,
 				reply,
-				&progress, 
+				&progress,
 			)
 
 		case WaitTask:

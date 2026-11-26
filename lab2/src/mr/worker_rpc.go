@@ -148,16 +148,15 @@ func reportMissingIntermediate(
 
 // heartbeat reports liveness and task progress independently of the task loop.
 func heartbeat(
-    workerID *uint64,
-    workerMu *sync.Mutex,
-    progress *progressState,
-    registerWorkerArgs *RegisterWorkerArgs,
-    stopHeartbeat <-chan struct{},
+	workerID *uint64,
+	workerMu *sync.Mutex,
+	progress *progressState,
+	registerWorkerArgs *RegisterWorkerArgs,
+	stopHeartbeat <-chan struct{},
 ) {
 	for {
-		workerMu.Lock()
+
 		currentWorkerID := *workerID
-		workerMu.Unlock()
 
 		// Copy progress before the RPC so task execution can continue.
 		heartbeatArgs := progress.snapshot()

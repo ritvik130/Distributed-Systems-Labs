@@ -8,12 +8,12 @@ import (
 
 // executeMap partitions Map output and reports the local intermediate files.
 func executeMap(
-    workerID uint64,
-    data []byte,
-    fileName string,
-    mapf func(string, string) []KeyValue,
-    reply *RequestTaskReply,
-    progress *progressState,
+	workerID uint64,
+	data []byte,
+	fileName string,
+	mapf func(string, string) []KeyValue,
+	reply *RequestTaskReply,
+	progress *progressState,
 ) {
 	if reply.NReduce <= 0 {
 		fmt.Println("Invalid number of reduce tasks")
@@ -35,7 +35,7 @@ func executeMap(
 	}
 
 	intermediateFiles := make([]string, reply.NReduce)
-	
+
 	// Include the attempt ID to distinguish outputs from speculative copies.
 	progress.setStage(StageMapWrite)
 	for r, partition := range partitions {

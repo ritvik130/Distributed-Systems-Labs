@@ -11,11 +11,11 @@ import (
 
 // executeReduce groups intermediate values and uploads the final result.
 func executeReduce(
-    workerID uint64,
-    content [][]byte,
-    reducef func(string, []string) string,
-    reply *RequestTaskReply,
-    progress *progressState,
+	workerID uint64,
+	content [][]byte,
+	reducef func(string, []string) string,
+	reply *RequestTaskReply,
+	progress *progressState,
 ) {
 	data := make(map[string][]string)
 
@@ -85,7 +85,7 @@ func executeReduce(
 		cleanupFiles([]string{outputFile})
 		return
 	}
-	
+
 	progress.setStage(StageReduceUpload)
 	accepted, err := sendFile(workerID, reply, outputFile)
 
